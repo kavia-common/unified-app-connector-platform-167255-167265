@@ -1,13 +1,16 @@
 """
-FastAPI application entry point (skeleton).
+FastAPI application entry point.
 
-This file wires the models init to startup for ensuring DB and indexes.
+Wires models init and registers API routers and global error handlers.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .models import init_models
+from .api import api_router
+from .utils.errors import ApiError, ErrorCode, standard_response
 
 app = FastAPI(
     title="Connector Backend API",
@@ -18,6 +21,8 @@ app = FastAPI(
         {"name": "connectors", "description": "Connector registry"},
         {"name": "auth", "description": "Auth and tokens"},
         {"name": "rate-limit", "description": "Rate limiting and usage"},
+        {"name": "operations", "description": "Search/Create operations"},
+        {"name": "ai", "description": "LLM proxy and AI tools"},
     ],
 )
 
@@ -38,3 +43,16 @@ async def healthz() -> dict:
     Basic health check endpoint.
     """
     return {"status": "ok"}
+
+
+# Register routers
+app.include_router(api_router)
+
+
+# Global error handler for ApiError -> JSON envelope
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    return JSONResponse(
+        status_code=400,
+        content={"status": "error", "error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+    )
