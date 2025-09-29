@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
+from pydantic.config import ConfigDict
 from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
 
 # Collection names (centralized)
@@ -26,19 +27,25 @@ USERTOKENS_COLL = "user_tokens"  # OAuth/API key credentials by tenant+connectio
 
 # ---------- DB-Facing Models ----------
 
+class BaseDBModel(BaseModel):
+    """
+    Common base for MongoDB-facing models to ensure alias handling and arbitrary types.
+    """
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
-class TenantDoc(BaseModel):
+
+class TenantDoc(BaseDBModel):
     """DB document for Tenant records."""
 
-    _id: Optional[str] = Field(default=None, description="Tenant identifier (string ObjectId or custom ID).")
+    id: Optional[str] = Field(default=None, alias="_id", description="Tenant identifier (string ObjectId or custom ID).")
     name: str = Field(..., description="Tenant display name.")
     created_at: datetime = Field(default_factory=datetime.utcnow, description="Creation timestamp.")
 
 
-class ConnectorDoc(BaseModel):
+class ConnectorDoc(BaseDBModel):
     """DB document for a registered connector instance for a tenant."""
 
-    _id: Optional[str] = Field(default=None, description="Connection identifier.")
+    id: Optional[str] = Field(default=None, alias="_id", description="Connection identifier.")
     tenant_id: str = Field(..., description="Owning tenant id.")
     provider: str = Field(..., description="Provider key, e.g., 'jira', 'confluence'.")
     name: str = Field(..., description="Human-friendly name.")
@@ -47,10 +54,10 @@ class ConnectorDoc(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow, description="Creation timestamp.")
 
 
-class IntegrationDoc(BaseModel):
+class IntegrationDoc(BaseDBModel):
     """DB document describing a logical integration configuration."""
 
-    _id: Optional[str] = Field(default=None, description="Integration identifier.")
+    id: Optional[str] = Field(default=None, alias="_id", description="Integration identifier.")
     tenant_id: str = Field(..., description="Tenant id.")
     connection_id: str = Field(..., description="Associated connector/connection id.")
     name: str = Field(..., description="Integration name.")
@@ -58,7 +65,7 @@ class IntegrationDoc(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow, description="Creation timestamp.")
 
 
-class UserTokenDoc(BaseModel):
+class UserTokenDoc(BaseDBModel):
     """
     DB document for user/connection credentials.
 
@@ -66,7 +73,7 @@ class UserTokenDoc(BaseModel):
     - For API Key, only salted hash is stored; plaintext never persisted
     """
 
-    _id: Optional[str] = Field(default=None, description="Token record id.")
+    id: Optional[str] = Field(default=None, alias="_id", description="Token record id.")
     tenant_id: str = Field(..., description="Tenant id.")
     connection_id: str = Field(..., description="Connection id.")
     kind: str = Field(..., description="Either 'oauth' or 'api_key'.")
@@ -120,7 +127,7 @@ async def upsert_user_token(
     doc: UserTokenDoc,
 ) -> Tuple[bool, str]:
     """Upsert a user token by (tenant_id, connection_id). Returns (updated, id)."""
-    payload = doc.model_dump(exclude_none=True)
+    payload = doc.model_dump(exclude_none=True, by_alias=True)
     payload["updated_at"] = datetime.utcnow()
 
     result = await coll.update_one(
