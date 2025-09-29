@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status, Request
+from src.core.rate_limiter import key_by_tenant, key_by_user_or_tenant
 from pydantic import BaseModel, Field
 
 from src.connectors.base import (
@@ -129,7 +130,9 @@ class CreateBody(BaseModel):
     description="Routes a generic search request to the specified provider's search implementation.",
     response_model=SearchResponse,
 )
-async def proxy_search(body: SearchBody, ctx: TenantContext = Depends(get_tenant_context)) -> SearchResponse:
+async def proxy_search(body: SearchBody, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> SearchResponse:
+    # SlowAPI: 60/min per user/tenant
+    await request.app.state.limiter.limit("60/minute", key_func=key_by_user_or_tenant)(lambda r: None)(request)  # type: ignore
     """
     PUBLIC_INTERFACE
     Proxy search to provider.
@@ -179,7 +182,9 @@ async def proxy_search(body: SearchBody, ctx: TenantContext = Depends(get_tenant
     description="Routes a generic create request to the specified provider's create implementation.",
     response_model=CreateResponse,
 )
-async def proxy_create(body: CreateBody, ctx: TenantContext = Depends(get_tenant_context)) -> CreateResponse:
+async def proxy_create(body: CreateBody, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> CreateResponse:
+    # SlowAPI: 20/min per tenant
+    await request.app.state.limiter.limit("20/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
     """
     PUBLIC_INTERFACE
     Proxy create to provider.
@@ -232,11 +237,15 @@ async def list_projects(
     tenant_id: str = Query(..., description="Tenant id."),
     connection_id: str = Query(..., description="Connection id."),
     ctx: TenantContext = Depends(get_tenant_context),
+    request: Request = None,
 ) -> MetadataResponse:
     """
     PUBLIC_INTERFACE
     List projects by delegating to provider metadata(resource='projects').
     """
+    # SlowAPI: 60/min per tenant
+    await request.app.state.limiter.limit("60/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
+
     await enforce_tenant_match(ctx, tenant_id)
     await authorize_connection_access(ctx, connection_id)
 
@@ -276,6 +285,7 @@ async def list_spaces(
     tenant_id: str = Query(..., description="Tenant id."),
     connection_id: str = Query(..., description="Connection id."),
     ctx: TenantContext = Depends(get_tenant_context),
+    request: Request = None,
 ) -> MetadataResponse:
     """
     PUBLIC_INTERFACE

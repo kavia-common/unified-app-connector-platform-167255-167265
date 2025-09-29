@@ -9,6 +9,12 @@ from src.core.errors import register_exception_handlers
 from src.routers.connectors import router as connectors_router
 from src.routers.auth import router as auth_router
 
+# SlowAPI imports
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+
 settings = get_settings()
 
 
@@ -40,6 +46,20 @@ app = FastAPI(
 
 # Register global exception handlers for standardized error responses
 register_exception_handlers(app)
+
+# Initialize SlowAPI limiter
+limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+# Sanitized 429 handler to avoid leaking details
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request, exc: RateLimitExceeded):
+    from fastapi import Response
+    resp: Response = await _rate_limit_exceeded_handler(request, exc)
+    resp.body = b'{"detail":"Too many requests. Please retry later."}'
+    resp.media_type = "application/json"
+    return resp
 
 app.add_middleware(
     CORSMiddleware,

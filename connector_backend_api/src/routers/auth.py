@@ -7,6 +7,7 @@ from typing import Any, Dict, Literal, Optional, TypedDict
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from src.core.rate_limiter import key_by_tenant, key_by_user_or_tenant
 from pydantic import BaseModel, Field, HttpUrl
 
 from src.core.config import get_settings
@@ -239,7 +240,9 @@ def set_api_key(req: ApiKeyUpsertRequest):
         500: {"description": "Internal error"},
     },
 )
-async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
+async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> ApiKeyResponse:
+    # SlowAPI: 10/min per tenant for brute-force protection
+    await request.app.state.limiter.limit("10/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
     await enforce_tenant_match(ctx, req.tenant_id)
     await authorize_connection_access(ctx, req.connection_id)
 
@@ -279,7 +282,9 @@ async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = De
         500: {"description": "Internal error"},
     },
 )
-async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthLoginResponse:
+async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> OAuthLoginResponse:
+    # SlowAPI: 15/min per user/tenant
+    await request.app.state.limiter.limit("15/minute", key_func=key_by_user_or_tenant)(lambda r: None)(request)  # type: ignore
     """
     PUBLIC_INTERFACE
     Start OAuth flow for a connector.
@@ -353,6 +358,7 @@ async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_t
 async def oauth_callback(
     request: Request,
     code: Optional[str] = Query(default=None, description="Authorization code returned by the provider."),
+    # SlowAPI: 30/min per tenant to allow retries but prevent abuse
     state: str = Query(..., description="Opaque state parameter returned by the provider."),
     error: Optional[str] = Query(default=None, description="Optional error returned by provider."),
     error_description: Optional[str] = Query(default=None, description="Optional error description."),
@@ -366,6 +372,9 @@ async def oauth_callback(
     - Exchanges 'code' for tokens via provider token endpoint posted from frontend via form or query config (see notes).
     - Stores encrypted access/refresh tokens and expiry in DB.
     """
+    # Enforce rate limit first
+    await request.app.state.limiter.limit("30/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
+
     if error:
         # Do not echo raw provider error descriptions back to clients; keep message generic.
         raise HTTPException(
@@ -510,7 +519,9 @@ async def oauth_callback(
         500: {"description": "Refresh failed or internal error"},
     },
 )
-async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthRefreshResponse:
+async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> OAuthRefreshResponse:
+    # SlowAPI: 20/min per tenant to deter loops
+    await request.app.state.limiter.limit("20/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
     """
     PUBLIC_INTERFACE
     Refresh OAuth token for a connection if refresh_token is present.
@@ -604,7 +615,9 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
         400: {"description": "Invalid input"},
     },
 )
-async def set_api_key_async(req: ApiKeyUpsertRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
+async def set_api_key_async(req: ApiKeyUpsertRequest, ctx: TenantContext = Depends(get_tenant_context), request: Request = None) -> ApiKeyResponse:
+    # SlowAPI: 20/min per tenant
+    await request.app.state.limiter.limit("20/minute", key_func=key_by_tenant)(lambda r: None)(request)  # type: ignore
     await enforce_tenant_match(ctx, req.tenant_id)
     await authorize_connection_access(ctx, req.connection_id)
 
