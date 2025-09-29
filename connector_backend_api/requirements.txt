@@ -1,0 +1,16 @@
+# connector_backend_api requirements
+# Core web framework and ASGI server
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.23,<0.32
+
+# HTTP client for async external calls
+httpx>=0.24,<0.28
+
+# Data validation library (v2 used throughout code)
+pydantic>=2.0,<3.0
+
+# MongoDB async driver (Motor) and compatible PyMongo
+motor>=3.1,<4.0
+
+# Optional encryption for token storage (Fernet via cryptography)
+cryptography>=41,<43
