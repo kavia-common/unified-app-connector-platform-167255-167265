@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import get_settings
 from src.core.db import lifespan_shutdown, lifespan_startup
+from src.routers.connectors import router as connectors_router
 
 settings = get_settings()
 
@@ -22,6 +23,7 @@ async def app_lifespan(_app: FastAPI):
 
 openapi_tags = [
     {"name": "health", "description": "Service health and diagnostics."},
+    {"name": "connectors", "description": "Connector discovery and operations."},
 ]
 
 app = FastAPI(
@@ -39,6 +41,9 @@ app.add_middleware(
     allow_methods=settings.CORS_ALLOW_METHODS,
     allow_headers=settings.CORS_ALLOW_HEADERS,
 )
+
+# Register routers
+app.include_router(connectors_router)
 
 
 @app.get(
