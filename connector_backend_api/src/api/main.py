@@ -42,7 +42,7 @@ app.add_middleware(
     allow_origins=settings.CORS_ALLOW_ORIGINS,
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=settings.CORS_ALLOW_METHODS,
-    allow_headers=settings.CORS_ALLOW_HEADERS,
+    allow_headers=list(set(settings.CORS_ALLOW_HEADERS + [get_settings().TENANT_HEADER_NAME])),
 )
 
 # Register routers

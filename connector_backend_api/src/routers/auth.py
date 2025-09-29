@@ -6,12 +6,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Literal, Optional, TypedDict
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, HttpUrl
 
 from src.core.config import get_settings
 from src.core.db import get_tenant_collection
 from src.core.security import decode_oauth_state, encode_oauth_state, hash_api_key, verify_api_key
+from src.core.tenant import (
+    TenantContext,
+    get_tenant_context,
+    enforce_tenant_match,
+    authorize_connection_access,
+    write_audit_event,
+    AuditEvent,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -216,11 +224,27 @@ def set_api_key(req: ApiKeyUpsertRequest):
     description="Checks provided API key against stored salted hash for a connection.",
     response_model=ApiKeyResponse,
 )
-async def verify_api_key_route(req: ApiKeyVerifyRequest) -> ApiKeyResponse:
+async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
+    await enforce_tenant_match(ctx, req.tenant_id)
+    await authorize_connection_access(ctx, req.connection_id)
+
     rec = await _get_api_key_record(req.tenant_id, req.connection_id)
     if not rec or not rec.get("api_key_hash"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No API key stored.")
     valid = verify_api_key(req.api_key, rec["api_key_hash"])
+    # Audit
+    try:
+        import asyncio
+        asyncio.create_task(write_audit_event(ctx, AuditEvent(
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            actor_email=ctx.email,
+            action="auth.apikey.verify",
+            target={"connection_id": req.connection_id},
+            metadata={"valid": bool(valid)},
+        )))
+    except Exception:
+        pass
     return ApiKeyResponse(message="Verification complete.", valid=valid)
 
 
@@ -231,7 +255,7 @@ async def verify_api_key_route(req: ApiKeyVerifyRequest) -> ApiKeyResponse:
     response_model=OAuthLoginResponse,
     tags=["auth", "oauth"],
 )
-async def oauth_login(req: OAuthLoginRequest) -> OAuthLoginResponse:
+async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthLoginResponse:
     """
     PUBLIC_INTERFACE
     Start OAuth flow for a connector.
@@ -239,6 +263,9 @@ async def oauth_login(req: OAuthLoginRequest) -> OAuthLoginResponse:
     - Signs a 'state' JWT with tenant_id, connection_id, connector and nonce.
     - Returns the provider authorize URL with state and scopes.
     """
+    await enforce_tenant_match(ctx, req.tenant_id)
+    await authorize_connection_access(ctx, req.connection_id)
+
     settings = get_settings()
     nonce = base64.urlsafe_b64encode(os.urandom(18)).decode("utf-8").rstrip("=")
     state_payload: OAuthState = {
@@ -268,7 +295,20 @@ async def oauth_login(req: OAuthLoginRequest) -> OAuthLoginResponse:
     for k, v in query.items():
         authorize_url = authorize_url.copy_set_param(k, v)
 
-    return OAuthLoginResponse(authorize_url=HttpUrl(str(authorize_url), scheme=authorize_url.scheme), state=state)
+    resp = OAuthLoginResponse(authorize_url=HttpUrl(str(authorize_url), scheme=authorize_url.scheme), state=state)
+    try:
+        import asyncio
+        asyncio.create_task(write_audit_event(ctx, AuditEvent(
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            actor_email=ctx.email,
+            action="auth.oauth.login",
+            target={"connection_id": req.connection_id, "connector": req.connector},
+            metadata={"scopes": req.scopes},
+        )))
+    except Exception:
+        pass
+    return resp
 
 
 @router.get(
@@ -288,6 +328,7 @@ async def oauth_callback(
     state: str = Query(..., description="Opaque state parameter returned by the provider."),
     error: Optional[str] = Query(default=None, description="Optional error returned by provider."),
     error_description: Optional[str] = Query(default=None, description="Optional error description."),
+    ctx: TenantContext = Depends(get_tenant_context),
 ) -> OAuthCallbackResponse:
     """
     PUBLIC_INTERFACE
@@ -303,6 +344,19 @@ async def oauth_callback(
     try:
         sdata = decode_oauth_state(state)
     except Exception as ex:
+        # audit invalid state
+        try:
+            import asyncio
+            asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                tenant_id=ctx.tenant_id if ctx.tenant_id else "unknown",
+                actor_user_id=ctx.user_id,
+                actor_email=ctx.email,
+                action="auth.oauth.callback.invalid_state",
+                target={},
+                metadata={"error": str(ex)},
+            )))
+        except Exception:
+            pass
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid state: {ex}")
 
     # Extract exchanged token parameters from headers for flexibility:
@@ -326,9 +380,28 @@ async def oauth_callback(
     if redirect_uri:
         data["redirect_uri"] = redirect_uri
 
+    # Enforce tenant in state vs ctx (if ctx available)
+    try:
+        await enforce_tenant_match(ctx, sdata.get("tenant_id"))
+    except HTTPException as ex:
+        raise ex
+
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(token_url, data=data, headers={"Accept": "application/json"})
         if resp.status_code >= 400:
+            # audit failure
+            try:
+                import asyncio
+                asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                    tenant_id=sdata.get("tenant_id", ctx.tenant_id),
+                    actor_user_id=ctx.user_id,
+                    actor_email=ctx.email,
+                    action="auth.oauth.callback.exchange_failed",
+                    target={"connection_id": sdata.get("connection_id")},
+                    metadata={"status": resp.status_code, "body": resp.text[:512]},
+                )))
+            except Exception:
+                pass
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Token exchange failed: {resp.status_code} {resp.text}")
         token_payload = resp.json()
 
@@ -337,6 +410,18 @@ async def oauth_callback(
     expires_in = token_payload.get("expires_in")
 
     if not access_token:
+        try:
+            import asyncio
+            asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                tenant_id=sdata.get("tenant_id", ctx.tenant_id),
+                actor_user_id=ctx.user_id,
+                actor_email=ctx.email,
+                action="auth.oauth.callback.missing_access_token",
+                target={"connection_id": sdata.get("connection_id")},
+                metadata={},
+            )))
+        except Exception:
+            pass
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Token exchange did not return access_token")
 
     expires_at = await _upsert_oauth_tokens(
@@ -347,12 +432,25 @@ async def oauth_callback(
         expires_in=expires_in,
     )
 
-    return OAuthCallbackResponse(
+    resp = OAuthCallbackResponse(
         message="OAuth successful",
         connection_id=sdata["connection_id"],
         tenant_id=sdata["tenant_id"],
         expires_at=expires_at,
     )
+    try:
+        import asyncio
+        asyncio.create_task(write_audit_event(ctx, AuditEvent(
+            tenant_id=sdata["tenant_id"],
+            actor_user_id=ctx.user_id,
+            actor_email=ctx.email,
+            action="auth.oauth.callback.success",
+            target={"connection_id": sdata["connection_id"]},
+            metadata={"expires_at": expires_at.isoformat() if expires_at else None},
+        )))
+    except Exception:
+        pass
+    return resp
 
 
 @router.post(
@@ -362,11 +460,14 @@ async def oauth_callback(
     response_model=OAuthRefreshResponse,
     tags=["auth", "oauth"],
 )
-async def oauth_refresh(req: OAuthRefreshRequest) -> OAuthRefreshResponse:
+async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthRefreshResponse:
     """
     PUBLIC_INTERFACE
     Refresh OAuth token for a connection if refresh_token is present.
     """
+    await enforce_tenant_match(ctx, req.tenant_id)
+    await authorize_connection_access(ctx, req.connection_id)
+
     record = await _get_oauth_record(req.tenant_id, req.connection_id)
     if not record or not record.get("refresh_token_encrypted"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No refresh token stored for this connection.")
@@ -383,6 +484,18 @@ async def oauth_refresh(req: OAuthRefreshRequest) -> OAuthRefreshResponse:
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(str(req.token_url), data=data, headers={"Accept": "application/json"})
         if resp.status_code >= 400:
+            try:
+                import asyncio
+                asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                    tenant_id=req.tenant_id,
+                    actor_user_id=ctx.user_id,
+                    actor_email=ctx.email,
+                    action="auth.oauth.refresh.failed",
+                    target={"connection_id": req.connection_id},
+                    metadata={"status": resp.status_code, "body": resp.text[:512]},
+                )))
+            except Exception:
+                pass
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Refresh failed: {resp.status_code} {resp.text}")
         payload = resp.json()
 
@@ -401,6 +514,18 @@ async def oauth_refresh(req: OAuthRefreshRequest) -> OAuthRefreshResponse:
         expires_in=expires_in,
     )
 
+    try:
+        import asyncio
+        asyncio.create_task(write_audit_event(ctx, AuditEvent(
+            tenant_id=req.tenant_id,
+            actor_user_id=ctx.user_id,
+            actor_email=ctx.email,
+            action="auth.oauth.refresh.success",
+            target={"connection_id": req.connection_id},
+            metadata={"expires_at": expires_at.isoformat() if expires_at else None},
+        )))
+    except Exception:
+        pass
     return OAuthRefreshResponse(message="Token refreshed", expires_at=expires_at)
 
 
@@ -415,7 +540,10 @@ async def oauth_refresh(req: OAuthRefreshRequest) -> OAuthRefreshResponse:
         400: {"description": "Invalid input"},
     },
 )
-async def set_api_key_async(req: ApiKeyUpsertRequest) -> ApiKeyResponse:
+async def set_api_key_async(req: ApiKeyUpsertRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
+    await enforce_tenant_match(ctx, req.tenant_id)
+    await authorize_connection_access(ctx, req.connection_id)
+
     await _upsert_api_key(
         tenant_id=req.tenant_id,
         connection_id=req.connection_id,
@@ -423,4 +551,17 @@ async def set_api_key_async(req: ApiKeyUpsertRequest) -> ApiKeyResponse:
         header_name=req.header_name,
         prefix=req.prefix,
     )
+    # Audit
+    try:
+        import asyncio
+        asyncio.create_task(write_audit_event(ctx, AuditEvent(
+            tenant_id=req.tenant_id,
+            actor_user_id=ctx.user_id,
+            actor_email=ctx.email,
+            action="auth.apikey.set",
+            target={"connection_id": req.connection_id},
+            metadata={"header_name": req.header_name, "prefix": req.prefix},
+        )))
+    except Exception:
+        pass
     return ApiKeyResponse(message="API key stored.", valid=None)
