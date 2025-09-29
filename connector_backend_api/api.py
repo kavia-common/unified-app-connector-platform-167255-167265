@@ -53,6 +53,22 @@ from .utils.errors import (
 from .utils.limiter import rate_limit_guard
 from .utils.retry import retry_async
 
+# ---------- Compatibility/Shim Schemas ----------
+
+
+class ApiKeyShimRequest(BaseModel):
+    connector_key: Optional[str] = Field(None, description="Optional connector key override")
+    api_key: str = Field(..., description="API key/token")
+    user_id: Optional[str] = Field(None, description="Optional user id; may come from header")
+
+
+class DisconnectRequest(BaseModel):
+    user_id: Optional[str] = Field(None, description="Optional user id; may come from header")
+
+
+class RefreshRequest(BaseModel):
+    user_id: Optional[str] = Field(None, description="Optional user id; may come from header")
+
 
 # ---------- Pydantic Schemas ----------
 
@@ -449,6 +465,184 @@ async def llm_proxy(request: Request, ctx: TenantContext = Depends(get_tenant_co
 
     data = await retry_async(_op)
     return standard_response({"data": data})
+
+
+# ---------- Compatibility/Shim Routes ----------
+
+@api_router.get(
+    "/oauth/login",
+    tags=["auth"],
+    summary="Compatibility: Start OAuth flow (GET)",
+    description="Bridge to POST /auth/oauth/start using query string parameters."
+)
+async def oauth_login_get(
+    connector_key: str,
+    user_id: str,
+    state: Optional[str] = None,
+    scopes: Optional[str] = None,
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    """
+    PUBLIC_INTERFACE
+    Compatibility endpoint for older clients: GET /oauth/login?connector_key=...&user_id=...&state=...&scopes=...
+    Returns the same wrapped response as /auth/oauth/start.
+    """
+    scope_list = [s for s in (scopes or "").split(",") if s] if scopes is not None else None
+    body = OAuthStartRequest(connector_key=connector_key, user_id=user_id, state=state, scopes=scope_list)
+    return await auth_oauth_start(body, ctx)
+
+
+@api_router.post(
+    "/connect/{provider}/api-key",
+    tags=["auth"],
+    summary="Compatibility: API key auth alias",
+    description="Alias that forwards to /auth/api-key using path provider as connector_key."
+)
+async def connect_api_key_alias(
+    provider: str,
+    body: ApiKeyShimRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    """
+    PUBLIC_INTERFACE
+    Alias for API key auth. Uses provider path as connector_key unless body.connector_key provided.
+    """
+    connector_key = body.connector_key or provider
+    if not body.user_id:
+        # allow user_id to be required by frontend; if missing, return clear error
+        raise api_error_response(ErrorCode.BAD_REQUEST, "user_id is required")
+    req = ApiKeyAuthRequest(
+        connector_key=connector_key,
+        api_key=body.api_key,
+        user_id=body.user_id,
+        metadata=None,
+    )
+    return await auth_api_key(req, ctx)
+
+
+@api_router.post(
+    "/connect/{provider}/disconnect",
+    tags=["auth"],
+    summary="Disconnect user from provider",
+    description="Deletes stored token for the user/provider."
+)
+async def disconnect_provider(
+    provider: str,
+    body: DisconnectRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    """
+    PUBLIC_INTERFACE
+    Deletes stored user credentials for the connector (provider) within the tenant.
+    """
+    if not body.user_id:
+        raise api_error_response(ErrorCode.BAD_REQUEST, "user_id is required")
+    repo = UserTokenRepo()
+    deleted = await repo.delete_one(
+        {"tenant_id": ctx.tenant_id, "user_id": body.user_id, "connector_key": provider}
+    )
+    return standard_response({"disconnected": deleted > 0, "connector_key": provider, "user_id": body.user_id})
+
+
+@api_router.post(
+    "/connect/{provider}/refresh",
+    tags=["auth"],
+    summary="Refresh provider token (stub)",
+    description="Attempts to extend token expiry or trigger refresh; returns updated expiry if available."
+)
+async def refresh_provider_token(
+    provider: str,
+    body: RefreshRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+):
+    """
+    PUBLIC_INTERFACE
+    Stub to refresh or extend token expiry for the user/provider.
+    """
+    if not body.user_id:
+        raise api_error_response(ErrorCode.BAD_REQUEST, "user_id is required")
+
+    token_repo = UserTokenRepo()
+    connector_repo = ConnectorRepo()
+    connector = await connector_repo.find_one({"tenant_id": ctx.tenant_id, "key": provider})
+    if not connector:
+        raise api_error_response(ErrorCode.CONNECTOR_NOT_FOUND, "Connector not available")
+
+    service = get_provider_service(connector.key, connector.provider, ctx, token_repo)
+    tok = await service._ensure_valid_access_token(user_id=body.user_id, connector_key=provider)  # type: ignore
+    # Note: _ensure_valid_access_token may extend expiry if near
+    latest = await token_repo.find_one({"tenant_id": ctx.tenant_id, "user_id": body.user_id, "connector_key": provider})
+    exp = latest.expires_at.isoformat() if latest and latest.expires_at else None
+    return standard_response({"refreshed": True, "connector_key": provider, "user_id": body.user_id, "expires_at": exp})
+
+
+@api_router.get(
+    "/search",
+    tags=["operations"],
+    summary="Compatibility: GET search",
+    description="Bridge to POST /search using query parameters for legacy clients."
+)
+async def search_get(
+    connector_key: str,
+    user_id: str,
+    query: str,
+    limit: int = 10,
+    ctx: TenantContext = Depends(get_tenant_context),
+    _auth=Depends(require_authenticated_connector),
+):
+    """
+    PUBLIC_INTERFACE
+    GET /search bridge. Accepts query string and forwards to POST /search.
+    """
+    body = SearchRequest(
+        connector_key=connector_key,
+        user_id=user_id,
+        query=query,
+        filters=None,
+        limit=limit,
+    )
+    return await search(body, ctx, _auth)  # type: ignore
+
+
+@api_router.post(
+    "/chat",
+    tags=["ai"],
+    summary="Compatibility: Chat endpoint proxy",
+    description="Proxies to /llm-proxy and flattens to expected chat response fields."
+)
+async def chat_proxy(request: Request, ctx: TenantContext = Depends(get_tenant_context)):
+    """
+    PUBLIC_INTERFACE
+    Compatibility chat endpoint. Forwards body to /llm-proxy and maps result to common fields:
+    returns { status: 'ok', data: { message, toolCalls, raw } }.
+    """
+    # Reuse llm_proxy to perform forwarding
+    # Capture original payload in case mapping depends on it
+    original_payload = await request.json()
+
+    # Call llm_proxy to get standard_response({"data": ...})
+    proxy_response = await llm_proxy(Request(scope=request.scope, receive=request.receive), ctx)  # type: ignore
+    # proxy_response is already wrapped via standard_response and is a dict here
+    if isinstance(proxy_response, dict):
+        proxied_data = proxy_response.get("data", {}).get("data") or proxy_response.get("data")
+    else:
+        # Fallback if Response object; but our llm_proxy returns dict via standard_response
+        proxied_data = proxy_response
+
+    # Map to expected fields
+    message = None
+    tool_calls = None
+    if isinstance(proxied_data, dict):
+        # common LLM response shapes
+        message = proxied_data.get("message") or proxied_data.get("text") or proxied_data.get("reply")
+        tool_calls = proxied_data.get("toolCalls") or proxied_data.get("tools") or proxied_data.get("tool_calls")
+
+    mapped = {
+        "message": message,
+        "toolCalls": tool_calls,
+        "raw": proxied_data,
+    }
+    return standard_response(mapped)
 
 
 # ---------- Helpers ----------
