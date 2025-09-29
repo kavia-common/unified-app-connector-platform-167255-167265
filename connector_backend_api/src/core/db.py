@@ -57,6 +57,13 @@ async def _ping() -> None:
 async def lifespan_startup() -> None:
     """Startup hook to verify DB connectivity."""
     await _ping()
+    # Initialize required indexes for performance and constraints
+    try:
+        from src.core.crypto import ensure_core_indexes
+        await ensure_core_indexes()
+    except Exception:
+        # Do not block startup if index creation has transient issues
+        pass
 
 
 # PUBLIC_INTERFACE

@@ -104,16 +104,11 @@ def _tenant_tokens_collection(tenant_id: str):
     return get_tenant_collection("token_records", tenant_id)
 
 
-def _encrypt_token(plaintext: str) -> str:
-    """
-    NOTE: Placeholder "encryption".
-    For MVP we base64-encode. Replace with proper encryption (e.g., Fernet) in production.
-    """
-    return base64.b64encode(plaintext.encode("utf-8")).decode("utf-8")
+from src.core.crypto import EncryptionManager
 
-
-def _decrypt_token(ciphertext: str) -> str:
-    return base64.b64decode(ciphertext.encode("utf-8")).decode("utf-8")
+def _aad(tenant_id: str, connection_id: str) -> bytes:
+    # Bind ciphertext to tenant/connection to reduce cross-tenant token replay risk
+    return f"tenant:{tenant_id}|connection:{connection_id}".encode("utf-8")
 
 
 async def _upsert_oauth_tokens(
@@ -131,18 +126,24 @@ async def _upsert_oauth_tokens(
     if expires_in is not None:
         expires_at = now + timedelta(seconds=int(expires_in))
 
+    enc = EncryptionManager.from_env()
+    aad = _aad(tenant_id, connection_id)
+    acc_ct = enc.encrypt(access_token, aad=aad)
+    ref_ct = enc.encrypt(refresh_token, aad=aad) if refresh_token else None
+
     doc = {
         "tenant_id": tenant_id,
         "connection_id": connection_id,
         "kind": "oauth",
-        "access_token_encrypted": _encrypt_token(access_token),
-        "refresh_token_encrypted": _encrypt_token(refresh_token) if refresh_token else None,
+        "access_token_encrypted": acc_ct,
+        "refresh_token_encrypted": ref_ct,
+        "encryption_key_version": enc.key_version,
         "expires_at": expires_at,
         "updated_at": now,
         "created_at": now,
     }
 
-    # Upsert by (tenant_id, connection_id, kind)
+    # Upsert by (tenant_id, connection_id, kind) - unique index enforced
     await coll.update_one(
         {"tenant_id": tenant_id, "connection_id": connection_id, "kind": "oauth"},
         {"$set": {k: v for k, v in doc.items() if k != "created_at"}, "$setOnInsert": {"created_at": now}},
@@ -472,7 +473,11 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
     if not record or not record.get("refresh_token_encrypted"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No refresh token stored for this connection.")
 
-    refresh_token = _decrypt_token(record["refresh_token_encrypted"])
+    try:
+        enc = EncryptionManager.from_env()
+        refresh_token = enc.decrypt(record["refresh_token_encrypted"], aad=_aad(req.tenant_id, req.connection_id))
+    except Exception as ex:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not decrypt refresh token: {ex}")
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,

@@ -57,7 +57,7 @@ class TokenRecord(BaseModel):
     """
     Secure storage metadata for connector credentials.
 
-    For OAuth, access/refresh tokens will be stored encrypted (implementation later).
+    For OAuth, access/refresh tokens are stored encrypted (AES-GCM envelope JSON).
     For API Key, only a salted hash is stored here; plaintext is never persisted.
     """
 
@@ -66,11 +66,13 @@ class TokenRecord(BaseModel):
     connection_id: str = Field(..., description="Associated connection identifier.")
     kind: Literal["oauth", "api_key"] = Field(..., description="Type of token record.")
     # For OAuth
-    access_token_encrypted: Optional[str] = Field(default=None, description="Encrypted access token.")
-    refresh_token_encrypted: Optional[str] = Field(default=None, description="Encrypted refresh token.")
+    access_token_encrypted: Optional[str] = Field(default=None, description="Encrypted access token (AES-GCM envelope).")
+    refresh_token_encrypted: Optional[str] = Field(default=None, description="Encrypted refresh token (AES-GCM envelope).")
+    encryption_key_version: Optional[str] = Field(default=None, description="Version label of the key used for encryption.")
     expires_at: Optional[datetime] = Field(default=None, description="Access token expiration (UTC).")
     # For API key
     api_key_hash: Optional[str] = Field(default=None, description="Salted hash of API key.")
+    metadata: Dict[str, str] = Field(default_factory=dict, description="Additional metadata such as header_name/prefix.")
     # Bookkeeping
     created_at: datetime = Field(default_factory=datetime.utcnow, description="Creation timestamp.")
     updated_at: datetime = Field(default_factory=datetime.utcnow, description="Last update timestamp.")

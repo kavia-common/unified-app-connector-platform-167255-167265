@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     API_KEY_HASH_SALT: str = Field(default="CHANGE_ME_SALT", description="Salt for API key hashing.")
     API_KEY_HASH_ALGORITHM: str = Field(default="sha256", description="Algorithm for API key hashing.")
 
+    # Encryption for stored credentials (AES-GCM)
+    ENCRYPTION_KEY: str = Field(
+        default="",
+        description="Base64-encoded 32-byte key (AES-256) used for AES-GCM encryption. Do NOT hardcode in prod.",
+    )
+    ENCRYPTION_KEY_VERSION: str = Field(
+        default="v1",
+        description="Current active encryption key version label. Used for key rotation.",
+    )
+
     # Multi-tenant behavior
     TENANT_HEADER_NAME: str = Field(default="X-Tenant-ID", description="Header used to pass Tenant ID.")
     DEFAULT_TENANT_ID: Optional[str] = Field(default=None, description="Optional default tenant for dev/testing.")
