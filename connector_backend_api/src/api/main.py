@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.core.config import get_settings
 from src.core.db import lifespan_shutdown, lifespan_startup
 from src.routers.connectors import router as connectors_router
+from src.routers.auth import router as auth_router
 
 settings = get_settings()
 
@@ -24,6 +25,8 @@ async def app_lifespan(_app: FastAPI):
 openapi_tags = [
     {"name": "health", "description": "Service health and diagnostics."},
     {"name": "connectors", "description": "Connector discovery and operations."},
+    {"name": "auth", "description": "Credential management (API Key/OAuth)."},
+    {"name": "oauth", "description": "OAuth authorization and token lifecycle."},
 ]
 
 app = FastAPI(
@@ -44,6 +47,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(connectors_router)
+app.include_router(auth_router)
 
 
 @app.get(
