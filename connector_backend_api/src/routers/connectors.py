@@ -371,7 +371,7 @@ async def llm_tool_proxy(body: ToolInvokeBody, ctx: TenantContext = Depends(get_
     tool = body.tool.lower()
     if tool == "search":
         if not body.query:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing 'query' for search tool")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required parameter for search.")
         req = SearchRequest(
             query=body.query,
             tenant_id=body.tenant_id,
@@ -396,7 +396,7 @@ async def llm_tool_proxy(body: ToolInvokeBody, ctx: TenantContext = Depends(get_
         return result
     elif tool == "create":
         if not body.kind or body.payload is None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing 'kind' or 'payload' for create tool")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required parameters for create.")
         req = CreateRequest(
             tenant_id=body.tenant_id,
             connection_id=body.connection_id,
@@ -451,4 +451,4 @@ async def llm_tool_proxy(body: ToolInvokeBody, ctx: TenantContext = Depends(get_
             pass
         return result
     else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported tool")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported tool.")

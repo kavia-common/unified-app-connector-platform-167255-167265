@@ -367,12 +367,16 @@ async def oauth_callback(
     - Stores encrypted access/refresh tokens and expiry in DB.
     """
     if error:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Provider error: {error}: {error_description or ''}".strip())
+        # Do not echo raw provider error descriptions back to clients; keep message generic.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provider returned an error during authorization.",
+        )
 
     try:
         sdata = decode_oauth_state(state)
     except Exception as ex:
-        # audit invalid state
+        # audit invalid state with internal details, but only return a generic message to the client
         try:
             import asyncio
             asyncio.create_task(write_audit_event(ctx, AuditEvent(
@@ -381,11 +385,11 @@ async def oauth_callback(
                 actor_email=ctx.email,
                 action="auth.oauth.callback.invalid_state",
                 target={},
-                metadata={"error": str(ex)},
+                metadata={"error": "invalid_state", "exception": str(ex)},
             )))
         except Exception:
             pass
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid state: {ex}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OAuth state.")
 
     # Extract exchanged token parameters from headers for flexibility:
     # The frontend can POST or GET with headers x-token-url, x-client-id, x-client-secret, x-redirect-uri
@@ -396,7 +400,10 @@ async def oauth_callback(
     redirect_uri = request.headers.get("x-redirect-uri")
 
     if not all([code, token_url, client_id, client_secret]):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing code or token exchange configuration (headers).")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing code or token exchange configuration.",
+        )
 
     # Exchange code for tokens
     data = {
@@ -454,7 +461,10 @@ async def oauth_callback(
             )))
         except Exception:
             pass
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Token exchange did not return access_token")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Token exchange did not return an access token.",
+        )
 
     expires_at = await _upsert_oauth_tokens(
         tenant_id=sdata["tenant_id"],
@@ -515,8 +525,12 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
     try:
         enc = EncryptionManager.from_env()
         refresh_token = enc.decrypt(record["refresh_token_encrypted"], aad=_aad(req.tenant_id, req.connection_id))
-    except Exception as ex:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not decrypt refresh token: {ex}")
+    except Exception:
+        # Do not leak crypto/decryption internals
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not decrypt stored refresh token.",
+        )
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -551,7 +565,10 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
     expires_in = payload.get("expires_in")
 
     if not access_token:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Refresh response missing access_token")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Refresh failed to return an access token.",
+        )
 
     expires_at = await _upsert_oauth_tokens(
         tenant_id=req.tenant_id,
