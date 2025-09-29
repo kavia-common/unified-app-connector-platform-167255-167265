@@ -77,7 +77,10 @@ def get_database() -> AsyncIOMotorDatabase:
         RuntimeError if database was not initialized.
     """
     if _DB is None:
-        raise RuntimeError("Database not initialized. Call init_database() on startup.")
+        raise RuntimeError(
+            "Database not initialized. Ensure MONGODB_URI and MONGODB_DB are set. "
+            "Service can start without DB for health checks, but DB-backed routes require these envs."
+        )
     return _DB
 
 
@@ -88,6 +91,10 @@ async def init_database() -> None:
 
     Reads MONGODB_URI and MONGODB_DB from the environment.
     Optionally sets up encryption if ENCRYPTION_KEY is present.
+
+    Startup tolerance:
+    - If MONGODB_* envs are missing, we skip DB initialization so the app can still
+      boot for health checks. DB-dependent routes will raise a clear error when used.
     """
     global _DB_CLIENT, _DB, _ENCRYPTER
     if _DB is not None:
@@ -96,7 +103,8 @@ async def init_database() -> None:
     mongo_uri = os.getenv("MONGODB_URI")
     mongo_db = os.getenv("MONGODB_DB")
     if not mongo_uri or not mongo_db:
-        raise RuntimeError("MONGODB_URI and MONGODB_DB must be set in the environment")
+        # Skip DB initialization to allow service to start; routes will fail on access.
+        return
 
     _DB_CLIENT = AsyncIOMotorClient(mongo_uri)
     _DB = _DB_CLIENT[mongo_db]
