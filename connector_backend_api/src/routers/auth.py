@@ -199,31 +199,7 @@ async def _get_api_key_record(tenant_id: str, connection_id: str) -> Optional[Di
 # ----- Routes -----
 
 
-@router.post(
-    "/apikey",
-    summary="Store or update API key for a connection",
-    description="Stores a hashed API key for a tenant/connection. Plaintext is never persisted.",
-    response_model=ApiKeyResponse,
-    responses={
-        200: {"description": "Stored/updated."},
-        400: {"description": "Invalid input"},
-        401: {"description": "Unauthorized"},
-        403: {"description": "Forbidden"},
-        404: {"description": "Not found"},
-        429: {"description": "Rate limited"},
-        500: {"description": "Internal error"},
-    },
-)
-def set_api_key(req: ApiKeyUpsertRequest):
-    """
-    PUBLIC_INTERFACE
-    Store or update API key credentials for a connection.
-
-    Persists a salted hash of the API key in the token store.
-    """
-    # Since Motor is async, but this handler is sync, we can switch to async by defining as async.
-    # For simplicity and consistency, define as async:
-    raise HTTPException(status_code=500, detail="Handler should be async")
+# removed sync stub (Motor operations require async); async version defined below
 
 
 @router.post(

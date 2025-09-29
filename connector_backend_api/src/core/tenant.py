@@ -65,8 +65,8 @@ async def get_tenant_context(
 
     # Normalize header name for tenant
     tenant_header = settings.TENANT_HEADER_NAME
-    # FastAPI auto-lowercases header keys in request.headers; use that mapping
-    req_tenant = request.headers.get(tenant_header.lower())
+    # Use case-insensitive lookup
+    req_tenant = request.headers.get(tenant_header) or request.headers.get(tenant_header.lower()) or request.headers.get("x-tenant-id")
     tenant_id = x_tenant_id or req_tenant or settings.DEFAULT_TENANT_ID
 
     roles: list[str] = []
@@ -82,11 +82,10 @@ async def get_tenant_context(
         try:
             claims = jwt.decode(
                 token,
-                settings.JWT_STATE_SECRET,  # For MVP reuse same secret; replace with dedicated APP_JWT_* later
+                settings.JWT_STATE_SECRET,  # TODO: replace with dedicated APP_JWT_* secret/keys
                 algorithms=[settings.JWT_ALGORITHM],
                 options={"verify_exp": False},  # Adjust as needed
             )
-            # Try tenant from claim if not provided in header
             tenant_id = tenant_id or claims.get("tenant_id")
             user_id = claims.get("user_id") or claims.get("sub") or None
             email = claims.get("email")
@@ -97,7 +96,7 @@ async def get_tenant_context(
             elif isinstance(claim_roles, list):
                 roles = [str(r) for r in claim_roles]
         except Exception:
-            # For MVP, if JWT invalid, proceed without JWT-derived fields (but still require tenant)
+            # Do not leak JWT parse errors
             pass
 
     if not tenant_id:

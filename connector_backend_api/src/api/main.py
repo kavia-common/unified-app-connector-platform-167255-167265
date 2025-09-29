@@ -47,6 +47,10 @@ app = FastAPI(
 # Register global exception handlers for standardized error responses
 register_exception_handlers(app)
 
+# Register security middleware
+from src.core.middleware import register_security_middleware
+register_security_middleware(app)
+
 # Initialize SlowAPI limiter
 limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
 app.state.limiter = limiter

@@ -1,5 +1,8 @@
 # Connector Backend API
 
+See SECURITY.md for security architecture, headers, rate limits, and configuration guidance.
+Copy .env.example to .env and set strong values for JWT_STATE_SECRET and ENCRYPTION_KEY before running in production.
+
 Backend service managing connectors, authentication (OAuth/API Key), multi-tenant logic, and business logic for interacting with third-party APIs such as Jira and Confluence.
 
 ## Run locally
