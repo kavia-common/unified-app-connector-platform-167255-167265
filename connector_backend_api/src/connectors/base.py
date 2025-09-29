@@ -9,6 +9,7 @@ This module defines:
 
 Notes:
 - The concrete connectors should use httpx/requests to call external APIs (not implemented here).
+- For resilient calls, use httpx_get_with_retry/httpx_post_with_retry from src.core.errors.
 - Secrets are not persisted here; see core.security and core.models.TokenRecord for storage metadata.
 """
 

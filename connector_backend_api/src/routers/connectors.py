@@ -14,6 +14,7 @@ from src.connectors.base import (
     SearchResponse,
 )
 from src.connectors.registry import get_registry
+from src.core.errors import NotFoundError, rate_limit_check
 from src.core.tenant import (
     TenantContext,
     authorize_connection_access,
@@ -77,10 +78,12 @@ def get_connector_metadata(
     Returns:
         ConnectorDescriptor as JSON.
     """
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=provider, route="GET:/connectors/{provider}/metadata")
     reg = get_registry()
     conn = reg.get(provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
     data = conn.descriptor().model_dump()
     try:
         import asyncio
@@ -137,10 +140,13 @@ async def proxy_search(body: SearchBody, ctx: TenantContext = Depends(get_tenant
     await enforce_tenant_match(ctx, body.tenant_id)
     await authorize_connection_access(ctx, body.connection_id)
 
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=body.provider, route="POST:/connectors/search")
+
     reg = get_registry()
     conn = reg.get(body.provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
 
     req = SearchRequest(
         query=body.query,
@@ -184,10 +190,13 @@ async def proxy_create(body: CreateBody, ctx: TenantContext = Depends(get_tenant
     await enforce_tenant_match(ctx, body.tenant_id)
     await authorize_connection_access(ctx, body.connection_id)
 
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=body.provider, route="POST:/connectors/create")
+
     reg = get_registry()
     conn = reg.get(body.provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
 
     req = CreateRequest(
         tenant_id=body.tenant_id,
@@ -231,10 +240,13 @@ async def list_projects(
     await enforce_tenant_match(ctx, tenant_id)
     await authorize_connection_access(ctx, connection_id)
 
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=provider, route="GET:/connectors/{provider}/projects")
+
     reg = get_registry()
     conn = reg.get(provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
 
     req = MetadataRequest(tenant_id=tenant_id, connection_id=connection_id, resource="projects", extra={})
     result = await conn.metadata(req)
@@ -272,10 +284,13 @@ async def list_spaces(
     await enforce_tenant_match(ctx, tenant_id)
     await authorize_connection_access(ctx, connection_id)
 
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=provider, route="GET:/connectors/{provider}/spaces")
+
     reg = get_registry()
     conn = reg.get(provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
 
     req = MetadataRequest(tenant_id=tenant_id, connection_id=connection_id, resource="spaces", extra={})
     result = await conn.metadata(req)
@@ -345,10 +360,13 @@ async def llm_tool_proxy(body: ToolInvokeBody, ctx: TenantContext = Depends(get_
     await enforce_tenant_match(ctx, body.tenant_id)
     await authorize_connection_access(ctx, body.connection_id)
 
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=body.provider, route="POST:/connectors/tools")
+
     reg = get_registry()
     conn = reg.get(body.provider)
     if not conn:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
+        raise NotFoundError("Provider not found")
 
     tool = body.tool.lower()
     if tool == "search":

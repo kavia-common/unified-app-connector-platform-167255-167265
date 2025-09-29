@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 from src.core.config import get_settings
 from src.core.db import get_tenant_collection
+from src.core.errors import ProviderError, rate_limit_check, httpx_post_with_retry
 from src.core.security import decode_oauth_state, encode_oauth_state, hash_api_key, verify_api_key
 from src.core.tenant import (
     TenantContext,
@@ -205,6 +206,11 @@ async def _get_api_key_record(tenant_id: str, connection_id: str) -> Optional[Di
     responses={
         200: {"description": "Stored/updated."},
         400: {"description": "Invalid input"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not found"},
+        429: {"description": "Rate limited"},
+        500: {"description": "Internal error"},
     },
 )
 def set_api_key(req: ApiKeyUpsertRequest):
@@ -224,10 +230,20 @@ def set_api_key(req: ApiKeyUpsertRequest):
     summary="Verify API key against stored hash",
     description="Checks provided API key against stored salted hash for a connection.",
     response_model=ApiKeyResponse,
+    responses={
+        200: {"description": "Verification result."},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "No API key stored."},
+        429: {"description": "Rate limited"},
+        500: {"description": "Internal error"},
+    },
 )
 async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
     await enforce_tenant_match(ctx, req.tenant_id)
     await authorize_connection_access(ctx, req.connection_id)
+
+    rate_limit_check(tenant_id=ctx.tenant_id, provider="auth", route="POST:/auth/apikey/verify")
 
     rec = await _get_api_key_record(req.tenant_id, req.connection_id)
     if not rec or not rec.get("api_key_hash"):
@@ -255,6 +271,13 @@ async def verify_api_key_route(req: ApiKeyVerifyRequest, ctx: TenantContext = De
     description="Generates a provider authorization URL and signed state parameter for initiating OAuth.",
     response_model=OAuthLoginResponse,
     tags=["auth", "oauth"],
+    responses={
+        200: {"description": "Authorization URL and state."},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        429: {"description": "Rate limited"},
+        500: {"description": "Internal error"},
+    },
 )
 async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthLoginResponse:
     """
@@ -319,7 +342,11 @@ async def oauth_login(req: OAuthLoginRequest, ctx: TenantContext = Depends(get_t
     response_model=OAuthCallbackResponse,
     tags=["auth", "oauth"],
     responses={
+        200: {"description": "OAuth successful"},
         400: {"description": "Bad request or invalid state"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        429: {"description": "Rate limited"},
         500: {"description": "Token exchange failure"},
     },
 )
@@ -387,24 +414,28 @@ async def oauth_callback(
     except HTTPException as ex:
         raise ex
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(token_url, data=data, headers={"Accept": "application/json"})
-        if resp.status_code >= 400:
-            # audit failure
-            try:
-                import asyncio
-                asyncio.create_task(write_audit_event(ctx, AuditEvent(
-                    tenant_id=sdata.get("tenant_id", ctx.tenant_id),
-                    actor_user_id=ctx.user_id,
-                    actor_email=ctx.email,
-                    action="auth.oauth.callback.exchange_failed",
-                    target={"connection_id": sdata.get("connection_id")},
-                    metadata={"status": resp.status_code, "body": resp.text[:512]},
-                )))
-            except Exception:
-                pass
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Token exchange failed: {resp.status_code} {resp.text}")
-        token_payload = resp.json()
+    # rate limit per tenant/provider route (auth callback - treat provider as sdata.connector)
+    rate_limit_check(tenant_id=ctx.tenant_id, provider=str(sdata.get("connector", "auth")), route="GET:/auth/oauth/callback")
+
+    try:
+        resp = await httpx_post_with_retry(token_url, data=data, headers={"Accept": "application/json"}, timeout=20)
+    except ProviderError as pe:
+        # audit failure
+        try:
+            import asyncio
+            asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                tenant_id=sdata.get("tenant_id", ctx.tenant_id),
+                actor_user_id=ctx.user_id,
+                actor_email=ctx.email,
+                action="auth.oauth.callback.exchange_failed",
+                target={"connection_id": sdata.get("connection_id")},
+                metadata=pe.meta or {},
+            )))
+        except Exception:
+            pass
+        # re-raise; centralized handler will format
+        raise pe
+    token_payload = resp.json()
 
     access_token = token_payload.get("access_token")
     refresh_token = token_payload.get("refresh_token")
@@ -460,6 +491,14 @@ async def oauth_callback(
     description="Uses stored refresh token to obtain a new access token and updates persisted credentials.",
     response_model=OAuthRefreshResponse,
     tags=["auth", "oauth"],
+    responses={
+        200: {"description": "Token refreshed."},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "No refresh token stored for this connection."},
+        429: {"description": "Rate limited"},
+        500: {"description": "Refresh failed or internal error"},
+    },
 )
 async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(get_tenant_context)) -> OAuthRefreshResponse:
     """
@@ -486,23 +525,26 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
         **req.extra,
     }
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(str(req.token_url), data=data, headers={"Accept": "application/json"})
-        if resp.status_code >= 400:
-            try:
-                import asyncio
-                asyncio.create_task(write_audit_event(ctx, AuditEvent(
-                    tenant_id=req.tenant_id,
-                    actor_user_id=ctx.user_id,
-                    actor_email=ctx.email,
-                    action="auth.oauth.refresh.failed",
-                    target={"connection_id": req.connection_id},
-                    metadata={"status": resp.status_code, "body": resp.text[:512]},
-                )))
-            except Exception:
-                pass
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Refresh failed: {resp.status_code} {resp.text}")
-        payload = resp.json()
+    # rate limit per tenant/provider/route
+    rate_limit_check(tenant_id=ctx.tenant_id, provider="auth", route="POST:/auth/oauth/refresh")
+
+    try:
+        resp = await httpx_post_with_retry(str(req.token_url), data=data, headers={"Accept": "application/json"}, timeout=20)
+    except ProviderError as pe:
+        try:
+            import asyncio
+            asyncio.create_task(write_audit_event(ctx, AuditEvent(
+                tenant_id=req.tenant_id,
+                actor_user_id=ctx.user_id,
+                actor_email=ctx.email,
+                action="auth.oauth.refresh.failed",
+                target={"connection_id": req.connection_id},
+                metadata=pe.meta or {},
+            )))
+        except Exception:
+            pass
+        raise pe
+    payload = resp.json()
 
     access_token = payload.get("access_token")
     new_refresh_token = payload.get("refresh_token", refresh_token)  # Some providers rotate; otherwise reuse.
@@ -548,6 +590,8 @@ async def oauth_refresh(req: OAuthRefreshRequest, ctx: TenantContext = Depends(g
 async def set_api_key_async(req: ApiKeyUpsertRequest, ctx: TenantContext = Depends(get_tenant_context)) -> ApiKeyResponse:
     await enforce_tenant_match(ctx, req.tenant_id)
     await authorize_connection_access(ctx, req.connection_id)
+
+    rate_limit_check(tenant_id=ctx.tenant_id, provider="auth", route="POST:/auth/apikey")
 
     await _upsert_api_key(
         tenant_id=req.tenant_id,

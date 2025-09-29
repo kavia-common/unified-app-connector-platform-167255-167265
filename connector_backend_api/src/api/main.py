@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import get_settings
 from src.core.db import lifespan_shutdown, lifespan_startup
+from src.core.errors import register_exception_handlers
 from src.routers.connectors import router as connectors_router
 from src.routers.auth import router as auth_router
 
@@ -36,6 +37,9 @@ app = FastAPI(
     openapi_tags=openapi_tags,
     lifespan=app_lifespan,
 )
+
+# Register global exception handlers for standardized error responses
+register_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
