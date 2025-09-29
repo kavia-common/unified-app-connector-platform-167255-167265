@@ -15,6 +15,7 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
 
 from src.core.config import get_settings
+from src.core.mongo_models import ensure_indexes
 
 _client: Optional[AsyncIOMotorClient] = None
 
@@ -59,8 +60,15 @@ async def lifespan_startup() -> None:
     await _ping()
     # Initialize required indexes for performance and constraints
     try:
-        from src.core.crypto import ensure_core_indexes
-        await ensure_core_indexes()
+        # Initialize core indexes for collections in this service
+        await ensure_indexes(get_database())
+        # Optional: downstream core indexes if defined elsewhere
+        try:
+            from src.core.crypto import ensure_core_indexes  # type: ignore
+            await ensure_core_indexes()
+        except Exception:
+            # Ignore if not present or fails; not critical for DB availability
+            pass
     except Exception:
         # Do not block startup if index creation has transient issues
         pass
